@@ -1,0 +1,1461 @@
+---
+title: "Cox PH: Diagnostics, Interactions & Model Building"
+subtitle: "A Comprehensive Guide to Building, Diagnosing, and Interpreting Survival Models"
+author: "Eric Delmelle"
+date: today
+format:
+  revealjs:
+    theme: simple
+    slide-number: true
+    chalkboard: true
+    code-line-numbers: true
+    incremental: false
+    smaller: true
+    scrollable: true
+    preview-links: auto
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-location: right
+    code-fold: show
+    code-tools: true
+    code-copy: true
+    number-sections: true
+    anchor-sections: true
+    smooth-scroll: true
+    link-external-newwindow: true
+    self-contained: true
+  pdf:
+    documentclass: article
+    toc: false
+    toc-depth: 3
+    number-sections: true
+    colorlinks: true
+    geometry:
+      - margin=1in
+execute:
+  warning: false
+  message: false
+  fig-width: 8
+  fig-height: 6
+  cache: false
+editor: visual
+---
+
+```{=html}
+<!--
+INSTRUCTOR GUIDE
+===============
+Timing breakdown (60-minute class):
+• 0–5 min:   Introduction & objectives review
+• 5–15 min:  KM warm-up & baseline Cox model
+• 15–25 min: Interactions (theory + examples)
+• 25–35 min: Non-linearity (transformations + splines)
+• 35–45 min: Diagnostics (PH, residuals, influence)
+• 45–55 min: Team exercise (hands-on practice)
+• 55–60 min: Debrief & Q&A
+
+Key teaching points:
+- Emphasize interpretation over mechanics
+- Use clinical context throughout
+- Connect each test to a research question
+- Encourage questions during diagnostics section
+-->
+```
+[Link to qmd (quarto markdown)](https://github.com/BSTA-150/chapter4/blob/main/chapter4.qmd)
+
+# Learning Objectives {.unnumbered}
+
+By the end of this session, you will be able to:
+
+::: {.callout-note icon="false"}
+## Core Competencies
+
+**Modeling Skills**
+
+-   Fit and interpret Cox proportional hazards models with multiple covariates
+-   Incorporate interaction terms and explain effect modification
+-   Handle non-linear relationships using transformations and splines
+
+**Diagnostic Skills**
+
+-   Test and address violations of the proportional hazards assumption
+-   Interpret Schoenfeld, Martingale, Deviance, and DFBeta residuals
+-   Identify influential observations and outliers
+
+**Model Selection**
+
+-   Apply the Events-Per-Variable (EPV) rule to avoid overfitting
+-   Compare competing models using AIC and likelihood ratio tests
+-   Evaluate predictive performance with concordance (C-index)
+:::
+
+::: callout-tip
+## Success Criteria
+
+You'll know you've mastered these concepts when you can:
+
+-   Explain why a hazard ratio changed after adding an interaction
+
+-   Decide whether to stratify or transform based on diagnostic plots
+
+-   Defend your model choices to a clinical collaborator
+:::
+
+------------------------------------------------------------------------
+
+# Part 1: Foundation {background-color="#f0f8ff"}
+
+## The Cox Model: Intuition
+
+Think of the Cox model as answering: **"How do patient characteristics modify their baseline risk?"**
+
+::: columns
+::: {.column width="50%"}
+**Mathematical Form** $$
+h(t\mid X) = h_0(t) \exp(\beta_1X_1 + \cdots + \beta_pX_p)
+$$
+
+where:
+
+-   $h(t|X)$ = hazard at time $t$ for covariate pattern $X$
+-   $h_0(t)$ = baseline hazard (everyone with $X=0$)
+-   $\exp(\beta_j)$ = hazard ratio (HR) for $X_j$
+:::
+
+::: {.column width="50%"}
+**Intuitive Interpretation**
+
+If $\beta_{\text{age}} = 0.03$: - HR = $e^{0.03} = 1.030$ - Each year older → **3% higher risk** - 10 years older → $1.03^{10} = 1.34$ → **34% higher risk**
+
+Key insight: Effects are **multiplicative** on the hazard scale.
+:::
+:::
+
+::: callout-important
+## The Proportional Hazards Assumption
+
+The "proportional" means the hazard ratio is **constant over time**. We'll test this assumption extensively in Part 4.
+:::
+
+------------------------------------------------------------------------
+
+# Setup & Data Preparation
+
+## Load Packages
+
+
+```{r}
+#| label: setup
+#| code-summary: "Click to see package setup"
+
+# Core survival analysis
+library(survival)
+library(survminer)
+
+# Model selection & penalization
+library(MASS)     # stepAIC
+library(glmnet)   # LASSO (optional)
+
+# Data manipulation & visualization
+library(dplyr)
+library(ggplot2)
+library(broom)    # Tidy model outputs
+library(knitr)    # Tables
+```
+
+::: callout-tip
+## Package Roles
+
+-   **survival**: Core Cox modeling (`coxph`, `cox.zph`)
+-   **survminer**: Beautiful survival plots (`ggsurvplot`, `ggcoxdiagnostics`)
+-   **broom**: Convert model output to tidy data frames
+:::
+
+## The Primary Biliary Cirrhosis (PBC) Dataset
+
+```{r}
+#| label: data-prep
+#| code-summary: "Data preparation steps"
+
+# Load and preprocess PBC data
+data(pbc, package = "survival")
+
+pbc <- pbc %>%
+  mutate(
+    # Define death as event (status==2); transplant censored for this tutorial
+    event = as.integer(status == 2),
+    
+    # Convert time from days to years for interpretability
+    time_years = time / 365.25,
+    
+    # Create interpretable factor labels
+    trt = factor(trt, labels = c("D-penicillamine", "Placebo")),
+    sex = factor(sex, labels = c("Male", "Female")),
+    edema = factor(
+      edema,
+      levels = c(0, 0.5, 1),
+      labels = c("None", "Controlled", "Persistent")
+    )
+  )
+
+# Quick overview
+glimpse(pbc)
+```
+
+### Dataset Summary
+
+```{r}
+#| label: data-summary
+
+cat("Total observations:", nrow(pbc), "\n")
+cat("Deaths (events):", sum(pbc$event, na.rm = TRUE), "\n")
+cat("Median follow-up:", round(median(pbc$time_years, na.rm = TRUE), 1), "years\n")
+cat("Missing data patterns:\n")
+pbc %>% 
+  summarise(across(everything(), ~sum(is.na(.)))) %>%
+  select(where(~. > 0)) %>%
+  kable()
+```
+
+::: callout-note
+## About PBC
+
+-   Primary Biliary Cirrhosis is a chronic liver disease. 
+-   Key prognostic factors include: 
+  -   **Bilirubin** (liver function marker) 
+  -   **Albumin** (nutritional status) 
+  -   **Edema** (fluid retention severity) 
+  -   **Prothrombin time** (blood clotting)
+:::
+
+::: callout-warning
+## Competing Risks Note
+
+Some patients received liver transplants (status==1). For this tutorial, we treat transplant as censoring to focus on Cox PH concepts. A complete analysis would use Fine-Gray competing risks models.
+:::
+
+------------------------------------------------------------------------
+
+# Part 2: Exploratory Analysis {background-color="#f0f8ff"}
+
+## Kaplan--Meier: The Foundation
+
+Before fitting Cox models, **always** visualize survival curves.
+
+### Overall Survival
+
+```{r}
+#| label: km-overall
+#| fig-cap: "Overall survival in the PBC cohort"
+
+fit_km <- survfit(Surv(time_years, event) ~ 1, data = pbc)
+
+ggsurvplot(
+  fit_km,
+  conf.int = TRUE,
+  risk.table = TRUE,
+  risk.table.height = 0.25,
+  xlab = "Time (years)",
+  ylab = "Survival Probability",
+  title = "Overall Survival: Primary Biliary Cirrhosis",
+  ggtheme = theme_minimal()
+)
+```
+
+::: callout-note
+## What to Look For
+
+-   **Median survival**: Where curve crosses 50%
+-   **Confidence intervals**: Width indicates uncertainty
+-   **Shape**: Steep drops suggest high early mortality
+:::
+
+### Survival by Treatment Group
+
+```{r}
+#| label: km-treatment
+#| fig-cap: "Comparing survival between treatment arms"
+
+fit_km_trt <- survfit(Surv(time_years, event) ~ trt, data = pbc)
+
+ggsurvplot(
+  fit_km_trt,
+  conf.int = TRUE,
+  pval = TRUE,
+  pval.method = TRUE,
+  risk.table = TRUE,
+  risk.table.height = 0.25,
+  legend.title = "Treatment",
+  legend.labs = c("D-penicillamine", "Placebo"),
+  palette = c("#E7B800", "#2E9FDF"),
+  xlab = "Time (years)",
+  title = "Survival by Treatment Arm"
+)
+```
+
+::: callout-tip
+## Interpreting the Log-Rank Test
+
+-   **Null hypothesis**: No difference in survival between groups
+-   **p-value \< 0.05**: Evidence of survival difference
+-   **Visual check**: Do confidence intervals overlap substantially?
+:::
+
+### Survival by Edema Status
+
+```{r}
+#| label: km-edema
+#| fig-cap: "Survival stratified by edema severity"
+
+fit_km_edema <- survfit(Surv(time_years, event) ~ edema, data = pbc)
+
+ggsurvplot(
+  fit_km_edema,
+  conf.int = TRUE,
+  pval = TRUE,
+  risk.table = TRUE,
+  risk.table.height = 0.3,
+  legend.title = "Edema Status",
+  palette = "jco",
+  xlab = "Time (years)",
+  title = "Survival by Edema Severity"
+)
+```
+
+::: callout-important
+## Clinical Insight
+
+**Persistent edema** (despite diuretics) is a strong prognostic marker. Notice the dramatic separation in survival curves---this will be important when we model interactions.
+:::
+
+**Quick Check:** Based on these KM curves, which factors do you expect to be significant in a Cox model?
+
+------------------------------------------------------------------------
+
+# Part 3: Baseline Cox Model {background-color="#f0f8ff"}
+
+## Building the Core Model
+
+Let's start with a model including clinical variables commonly used in PBC prognosis.
+
+```{r}
+#| label: baseline-model
+#| code-summary: "Baseline Cox model with main effects"
+
+# Select core variables and create complete-case dataset
+vars_core <- c("time_years", "event", "age", "sex", "trt", "edema", 
+               "bili", "albumin", "protime")
+dat_core <- pbc %>% 
+  select(all_of(vars_core)) %>% 
+  na.omit()
+
+cat("Complete cases:", nrow(dat_core), "\n")
+cat("Events in analysis:", sum(dat_core$event), "\n")
+
+# Fit Cox model
+cox_core <- coxph(
+  Surv(time_years, event) ~ age + sex + trt + edema + 
+    log(bili) + albumin + protime,
+  data = dat_core
+)
+
+# Display results
+summary(cox_core)
+```
+
+::: callout-note
+## Why log(bilirubin)?
+
+-   Bilirubin is right-skewed and its effect is likely non-linear. 
+-   The log transformation: 
+  -   1. Reduces skewness 
+  -   2. Makes the HR easier to interpret (per doubling) 
+  -   3. Often improves model fit
+:::
+
+### Visualizing Hazard Ratios
+
+```{r}
+#| label: forest-plot
+#| fig-cap: "Forest plot of hazard ratios from baseline model"
+#| fig-width: 10
+#| fig-height: 6
+
+ggforest(cox_core, data = dat_core, main = "Hazard Ratios: Baseline Model")
+```
+
+### Interpretation Guide
+
+```{r}
+#| label: hr-table
+#| code-summary: "Tidy hazard ratio table"
+
+tidy(cox_core, exponentiate = TRUE, conf.int = TRUE) %>%
+  mutate(
+    term = case_when(
+      term == "age" ~ "Age (per year)",
+      term == "sexFemale" ~ "Female vs Male",
+      term == "trtPlacebo" ~ "Placebo vs D-penicillamine",
+      term == "edemaControlled" ~ "Controlled edema vs None",
+      term == "edemaPersistent" ~ "Persistent edema vs None",
+      term == "log(bili)" ~ "log(Bilirubin) (per unit)",
+      term == "albumin" ~ "Albumin (per g/dL)",
+      term == "protime" ~ "Prothrombin time (per sec)",
+      TRUE ~ term
+    ),
+    interpretation = case_when(
+      estimate > 1 ~ paste0(round((estimate - 1) * 100, 1), "% higher risk"),
+      estimate < 1 ~ paste0(round((1 - estimate) * 100, 1), "% lower risk"),
+      TRUE ~ "No effect"
+    )
+  ) %>%
+  select(Predictor = term, HR = estimate, `95% CI Low` = conf.low, 
+         `95% CI High` = conf.high, `P-value` = p.value, interpretation) %>%
+  kable(digits = c(0, 2, 2, 2, 4, 0), caption = "Hazard Ratios with Clinical Interpretation")
+```
+
+::: callout-tip
+## Reading Hazard Ratios
+
+**For continuous variables:** 
+-   HR = 1.03 for age → 3% higher hazard per year older 
+-   HR = 2.50 for log(bili) → 150% higher hazard per unit increase in log(bili) 
+-   Equivalently: doubling bili increases hazard by \~250%
+
+**For categorical variables:** 
+-   HR = 2.50 for persistent edema → 150% higher hazard vs no edema 
+-   Same as saying "2.5 times the risk"
+:::
+
+------------------------------------------------------------------------
+
+# Part 4: Interactions {background-color="#fff4e6"}
+
+## Understanding Effect Modification
+
+An **interaction** means the effect of one variable depends on the level of another.
+
+::: columns
+::: {.column width="50%"}
+**Research Question**
+
+Does treatment effectiveness differ by edema severity?
+
+**Clinical Rationale**
+
+Perhaps treatment works well for mild disease (no edema) but is less effective with severe disease (persistent edema).
+:::
+
+::: {.column width="50%"}
+**Statistical Form**
+
+$$
+h(t) = h_0(t) \exp(\beta_1 \text{trt} + \beta_2 \text{edema} + \beta_3 \text{trt} \times \text{edema} + \cdots)
+$$
+
+The $\beta_3$ coefficient tells us how the treatment effect **changes** across edema levels.
+:::
+:::
+
+## Fitting the Interaction Model
+
+```{r}
+#| label: interaction-model
+#| code-summary: "Cox model with treatment × edema interaction"
+
+cox_int <- coxph(
+  Surv(time_years, event) ~ age + sex + trt * edema + 
+    log(bili) + albumin + protime,
+  data = dat_core
+)
+
+summary(cox_int)
+```
+
+### Testing the Interaction
+
+```{r}
+#| label: interaction-test
+
+# Likelihood ratio test: Does adding interaction improve fit?
+lrt <- anova(cox_core, cox_int, test = "Chisq")
+print(lrt)
+
+# Extract p-value
+int_pval <- lrt$`Pr(>|Chi|)`[2]
+cat("\nInteraction p-value:", round(int_pval, 4), "\n")
+
+if(int_pval < 0.05) {
+  cat("Interpretation: Treatment effect DOES vary by edema status (p < 0.05)\n")
+} else {
+  cat("Interpretation: No strong evidence of effect modification (p >= 0.05)\n")
+}
+```
+
+::: callout-important
+## Interpreting Interactions
+
+If the interaction is significant: 
+-   **Don't interpret main effects alone**---they're conditional 
+-   Calculate treatment HR **at each level** of the modifier 
+-   Use adjusted survival curves for visualization.
+-   Report stratum-specific effects in results
+:::
+
+### Visualizing the Interaction
+
+```{r}
+#| label: adjusted-curves
+#| fig-cap: "Adjusted survival curves showing treatment × edema interaction"
+#| fig-width: 10
+
+# Adjusted curves (holding other variables at typical values)
+ggadjustedcurves(
+  cox_int,
+  data = dat_core,
+  variable = "edema",
+  palette = "jco",
+  legend.title = "Edema Status",
+  xlab = "Time (years)",
+  ylab = "Adjusted Survival Probability",
+  ggtheme = theme_minimal()
+)
+```
+
+::: callout-tip
+## When to Include Interactions
+
+**Include if:** 
+-   Strong prior hypothesis (e.g., treatment × severity) 
+-   Exploratory analysis suggests effect modification 
+-   Clinical importance justifies complexity
+
+**Don't include:** 
+-   "Fishing" for significance 
+-   Sample size is small (reduces power) 
+-   You can't interpret the results clearly
+:::
+
+------------------------------------------------------------------------
+
+# Part 5: Non-Linearity {background-color="#fff4e6"}
+
+## Why Linearity Matters
+
+The Cox model assumes each continuous predictor has a **linear** effect on the log-hazard. This may not be true!
+
+**Example:** Age might have an accelerating effect (quadratic) or a threshold effect (spline).
+
+## Checking Functional Form: Martingale Residuals
+
+```{r}
+#| label: functional-form
+#| fig-cap: "Martingale residual plots for linearity assessment"
+#| fig-width: 10
+#| fig-height: 5
+
+# Check linearity for age and log(bili)
+ggcoxfunctional(
+  Surv(time_years, event) ~ age + log(bili),
+  data = dat_core,
+  point.col = "blue",
+  point.alpha = 0.5
+) + 
+  ggtitle("Functional Form Assessment: Red line should be roughly straight")
+```
+
+::: callout-note
+## Reading the Plot
+
+-   **Straight red line** → linear assumption is reasonable
+-   **Curved red line** → consider transformation or polynomial
+-   **U-shape** → quadratic term may help
+-   **Complex shape** → spline might be needed
+:::
+
+## Option 1: Polynomial Terms
+
+```{r}
+#| label: quadratic-model
+#| code-summary: "Adding a quadratic term for age"
+
+cox_quad <- coxph(
+  Surv(time_years, event) ~ poly(age, 2, raw = TRUE) + sex + trt + edema + 
+    log(bili) + albumin + protime,
+  data = dat_core
+)
+
+# Test improvement
+anova(cox_core, cox_quad)
+
+cat("\nQuadratic model summary:\n")
+summary(cox_quad)
+```
+
+::: callout-warning
+## Interpreting Polynomials
+
+With `age + age²`: 
+-   Main effect (age) = slope at age = 0 (not meaningful!) 
+-   Interpret via **marginal effects** or predicted curves 
+-   Or center age: use `poly(age - 50, 2)` for interpretation around age 50
+:::
+
+## Option 2: Flexible Splines
+
+```{r}
+#| label: spline-model
+#| code-summary: "Penalized spline for age"
+
+cox_spline <- coxph(
+  Surv(time_years, event) ~ pspline(age, df = 4) + sex + trt + edema + 
+    log(bili) + albumin + protime,
+  data = dat_core
+)
+
+# Test improvement
+anova(cox_core, cox_spline)
+
+# Note: Individual coefficients for splines are not directly interpretable
+cat("\nSpline test for non-linearity:\n")
+print(anova(cox_core, cox_spline))
+```
+
+### Visualizing the Age Effect
+
+```{r}
+#| label: age-effect-plot
+#| fig-cap: "Estimated hazard ratio as a function of age (spline model)"
+
+# Extract predicted log-hazard for age range
+age_seq <- seq(min(dat_core$age), max(dat_core$age), length.out = 100)
+pred_data <- data.frame(
+  age = age_seq,
+  sex = "Female",  # Hold others constant
+  trt = "Placebo",
+  edema = "None",
+  bili = median(dat_core$bili),
+  albumin = median(dat_core$albumin),
+  protime = median(dat_core$protime)
+)
+
+# Get predictions (requires some manipulation for splines)
+# For demonstration, show linear vs quadratic comparison instead
+pred_linear <- predict(cox_core, newdata = pred_data, type = "risk", reference = "sample")
+pred_quad <- predict(cox_quad, newdata = pred_data, type = "risk", reference = "sample")
+
+plot_data <- data.frame(
+  age = age_seq,
+  linear = pred_linear,
+  quadratic = pred_quad
+) %>%
+  tidyr::pivot_longer(-age, names_to = "model", values_to = "relative_hazard")
+
+ggplot(plot_data, aes(x = age, y = relative_hazard, color = model)) +
+  geom_line(size = 1.2) +
+  scale_color_manual(values = c("linear" = "blue", "quadratic" = "red")) +
+  labs(
+    title = "Relative Hazard by Age",
+    subtitle = "Comparing linear vs quadratic functional forms",
+    x = "Age (years)",
+    y = "Relative Hazard (vs median age)",
+    color = "Model"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "top")
+```
+
+::: callout-tip
+## Choosing Between Options
+
+**Use polynomial** when: 
+-   You expect a simple curve (U-shape, inverted U) 
+-   You want to explain results in words 
+-   Sample size is moderate
+
+**Use spline** when: 
+-   Relationship is complex 
+-   Prediction accuracy is paramount 
+-   You have large sample size
+
+**Use neither** when: 
+-   Linear assumption holds (check first!) 
+-   Sample size is small (conserve df)
+:::
+
+------------------------------------------------------------------------
+
+# Part 6: Diagnostics {background-color="#ffe6e6"}
+
+## The Proportional Hazards Assumption
+
+**Key Concept:** Cox PH assumes hazard ratios are **constant over time**.
+
+If violated, interpretation becomes complex---a HR of 2.0 at 1 year might be 1.5 at 5 years.
+
+### Testing PH: Schoenfeld Residuals
+
+```{r}
+#| label: ph-test
+#| code-summary: "Testing proportional hazards assumption"
+
+ph_test <- cox.zph(cox_int)
+print(ph_test)
+```
+
+::: callout-note
+## Interpreting the Table
+
+-   **Global test**: Overall PH assumption (bottom row)
+-   **Individual tests**: Each covariate separately
+-   **p \< 0.05**: Evidence of violation → investigate
+-   **p ≥ 0.05**: Assumption appears reasonable
+:::
+
+### Visualizing PH Violations
+
+```{r}
+#| label: ph-plots
+#| fig-cap: "Schoenfeld residual plots (trend indicates PH violation)"
+#| fig-width: 10
+#| fig-height: 8
+
+ggcoxzph(ph_test, 
+         point.col = "blue", 
+         point.alpha = 0.5,
+         ggtheme = theme_minimal())
+```
+
+::: callout-important
+## What to Look For
+
+-   **Horizontal line (β = constant)**: PH assumption met ✓
+-   **Trending line**: PH violation---effect changes over time ✗
+-   **Focus on p-value AND visual**: Both matter!
+:::
+
+## Addressing PH Violations
+
+### Option: Stratification
+
+When a **categorical** variable violates PH, stratify on it:
+
+```{r}
+#| label: stratified-model
+#| code-summary: "Stratifying on edema (if it violated PH)"
+
+# Example: If edema violates PH, we stratify
+cox_strata <- coxph(
+  Surv(time_years, event) ~ age + sex + trt + 
+    log(bili) + albumin + protime + strata(edema),
+  data = dat_core
+)
+
+summary(cox_strata)
+```
+
+::: callout-warning
+## Trade-offs of Stratification
+
+**Advantages:** 
+-   Allows different baseline hazards by stratum 
+-   Retains all other covariate effects
+
+**Disadvantages:** 
+-   **Cannot estimate** HR for the stratified variable 
+-   Reduces power slightly 
+-   Only works for categorical variables
+:::
+
+::: callout-note
+## Not Covered Today: Time-Varying Coefficients
+
+For advanced analyses, you can model $\beta(t)$ directly using `tt()` functions or time-dependent covariates. This is beyond our scope but important for specialized applications.
+:::
+
+------------------------------------------------------------------------
+
+## Residual Diagnostics
+
+### 1. Deviance Residuals: Overall Fit
+
+```{r}
+#| label: deviance-residuals
+#| fig-cap: "Deviance residuals vs linear predictor"
+#| fig-width: 10
+
+ggcoxdiagnostics(
+  cox_int,
+  type = "deviance",
+  linear.predictions = TRUE,
+  ggtheme = theme_minimal()
+) +
+  ggtitle("Deviance Residuals: Should be symmetrically scattered around 0") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red")
+```
+
+::: callout-note
+## What to Look For
+
+-   **Random scatter around 0**: Good fit
+-   **Patterns (curves, fans)**: Functional form issues
+-   **Outliers**: Investigate individual cases
+:::
+
+### 2. Martingale Residuals: Non-Linearity
+
+```{r}
+#| label: martingale-residuals
+#| fig-cap: "Martingale residuals: Detecting systematic misfits"
+#| fig-width: 10
+
+ggcoxdiagnostics(
+  cox_int,
+  type = "martingale",
+  linear.predictions = FALSE,
+  ggtheme = theme_minimal()
+) +
+  ggtitle("Martingale Residuals: Large negative values indicate poor predictions")
+```
+
+### 3. DFBeta: Influential Observations
+
+```{r}
+#| label: dfbeta-residuals
+#| fig-cap: "DFBeta residuals: Influence on coefficients"
+#| fig-width: 10
+#| fig-height: 8
+
+ggcoxdiagnostics(
+  cox_int,
+  type = "dfbeta",
+  linear.predictions = FALSE,
+  ggtheme = theme_minimal()
+) +
+  ggtitle("DFBeta: Large values indicate observations influencing specific coefficients")
+```
+
+::: callout-tip
+## Dealing with Influential Points
+
+**Investigate but don't automatically remove:** 
+-   Check for data entry errors 
+-   Understand clinical context (unusual but valid?) 
+-   Fit model with/without outliers---does conclusion change? 
+-   Report sensitivity analysis if influential
+
+**Never** remove data just to improve fit without justification!
+:::
+
+------------------------------------------------------------------------
+
+# Part 7: Model Performance {background-color="#e6f3ff"}
+
+## Concordance (C-index)
+
+The **C-index** measures discriminative ability: Can the model rank patients by risk?
+
+```{r}
+#| label: concordance
+
+conc <- summary(cox_int)$concordance
+cat("C-index:", round(conc[1], 3), "\n")
+cat("SE:", round(conc[2], 3), "\n")
+```
+
+::: callout-note
+## C-Index Interpretation
+
+| C-Index | Performance | Interpretation                       |
+|---------|-------------|--------------------------------------|
+| 0.50    | Random      | Model has no discriminative ability  |
+| 0.60    | Poor        | Weak discrimination                  |
+| 0.70    | Acceptable  | Moderate discrimination              |
+| 0.80    | Good        | Strong discrimination                |
+| 0.90    | Excellent   | Very strong (check for overfitting!) |
+
+**Rule of thumb:** Clinical models often achieve 0.65--0.75 for most endpoints.
+:::
+
+## Comparing Models
+
+### Likelihood Ratio Tests (Nested Models)
+
+```{r}
+#| label: model-comparison-lrt
+
+# Compare core vs interaction model
+cat("Core vs Interaction Model:\n")
+anova(cox_core, cox_int, test = "Chisq")
+
+cat("\n\nCore vs Quadratic Age Model:\n")
+anova(cox_core, cox_quad, test = "Chisq")
+
+cat("\n\nCore vs Spline Age Model:\n")
+anova(cox_core, cox_spline, test = "Chisq")
+```
+
+### AIC Comparison (Any Models)
+
+```{r}
+#| label: model-comparison-aic
+
+# AIC: Lower is better
+aic_table <- AIC(cox_core, cox_int, cox_quad, cox_spline) %>%
+  mutate(
+    Model = c("Core (main effects only)", 
+              "Interaction (trt × edema)", 
+              "Quadratic age", 
+              "Spline age"),
+    Delta_AIC = AIC - min(AIC)
+  ) %>%
+  arrange(AIC) %>%
+  select(Model, df, AIC, Delta_AIC)
+
+kable(aic_table, digits = 1, 
+      caption = "Model Comparison via AIC (lower is better)")
+```
+
+::: callout-tip
+## Interpreting ΔAIC
+
+-   **ΔAIC \< 2**: Models essentially equivalent
+-   **ΔAIC 2--7**: Some evidence for better model
+-   **ΔAIC \> 10**: Strong evidence for better model
+
+Prefer simpler model if ΔAIC \< 2!
+:::
+
+### Comprehensive Model Summary
+
+```{r}
+#| label: model-summary-table
+
+models <- list(
+  Core = cox_core,
+  Interaction = cox_int,
+  Quadratic = cox_quad,
+  Spline = cox_spline
+)
+
+comparison <- data.frame(
+  Model = names(models),
+  Parameters = sapply(models, \(m) length(coef(m))),
+  LogLik = sapply(models, \(m) round(logLik(m)[1], 1)),
+  AIC = sapply(models, AIC) %>% round(1),
+  C_index = sapply(models, \(m) round(summary(m)$concordance[1], 3))
+) %>%
+  mutate(
+    Delta_AIC = AIC - min(AIC),
+    Rank = rank(AIC)
+  ) %>%
+  arrange(Rank)
+
+kable(comparison, 
+      caption = "Comprehensive Model Performance Summary",
+      digits = c(0, 0, 1, 1, 3, 1, 0))
+```
+
+------------------------------------------------------------------------
+
+# Part 8: Variable Selection {background-color="#e6f3ff"}
+
+## The Events-Per-Variable (EPV) Rule
+
+**Classic guideline:** Need ≥10 events per parameter to avoid overfitting.
+
+```{r}
+#| label: epv-calculation
+
+n_events <- sum(dat_core$event)
+n_params_core <- length(coef(cox_core))
+
+cat("Events:", n_events, "\n")
+cat("Parameters in core model:", n_params_core, "\n")
+cat("EPV ratio:", round(n_events / n_params_core, 1), "\n\n")
+
+max_safe_params <- floor(n_events / 10)
+cat("Safe parameter budget (≥10 EPV):", max_safe_params, "\n")
+```
+
+::: callout-warning
+## EPV Violations: Risks
+
+**Too many parameters** (low EPV) leads to: 
+-   Overfit model (great fit on training data, poor on new data) 
+-   Unstable coefficient estimates 
+-   Unreliable confidence intervals 
+-   Biased p-values
+
+**Solutions:** 
+-   Remove less important predictors 
+-   Use domain knowledge for selection 
+-   Consider penalization (LASSO) for many weak predictors
+:::
+
+## Automated Selection: Stepwise (Use with Caution!)
+
+```{r}
+#| label: stepwise-selection
+#| code-summary: "Stepwise selection via AIC (use cautiously)"
+
+# Expand to include more potential predictors
+vars_all <- c("time_years", "event", "age", "sex", "trt", "edema", 
+              "bili", "albumin", "protime", "chol", "copper")
+dat_all <- pbc %>% 
+  select(all_of(vars_all)) %>% 
+  na.omit()
+
+cat("Complete cases with extended variables:", nrow(dat_all), "\n")
+cat("Events:", sum(dat_all$event), "\n\n")
+
+# Fit full model
+fit_full <- coxph(
+  Surv(time_years, event) ~ age + sex + trt + edema + 
+    log(bili) + albumin + protime + log(chol) + log(copper),
+  data = dat_all
+)
+
+# Stepwise selection
+fit_step <- stepAIC(fit_full, direction = "both", trace = 0)
+
+cat("Stepwise-selected model:\n")
+print(formula(fit_step))
+cat("\n")
+summary(fit_step)
+```
+
+::: callout-warning
+## Stepwise Selection: Caveats
+
+**Problems:** 
+-   Inflates Type I error (false positives) 
+-   P-values post-selection are too optimistic 
+-   Unstable---small data changes → big model changes 
+-   Ignores clinical importance
+
+**Better approaches:** 
+-   **A priori model** based on literature/domain knowledge 
+-   **LASSO** for high-dimensional data with cross-validation 
+-   **Staged approach**: core clinical model → add interactions/non-linearity if justified
+:::
+
+## Advanced: LASSO Penalization
+
+```{r}
+#| label: lasso
+#| code-summary: "LASSO Cox regression (L1 penalization)"
+
+# Prepare design matrix
+X <- model.matrix(
+  Surv(time_years, event) ~ age + sex + trt + edema + 
+    log(bili) + albumin + protime + log(chol) + log(copper),
+  data = dat_all
+)[, -1]  # Remove intercept
+
+Y <- Surv(dat_all$time_years, dat_all$event)
+
+# Fit LASSO with cross-validation
+set.seed(123)
+fit_lasso <- cv.glmnet(X, Y, family = "cox", alpha = 1, nfolds = 10)
+
+# Plot cross-validation curve
+plot(fit_lasso, main = "LASSO Cross-Validation: Selecting Penalty Parameter")
+```
+
+### LASSO Selected Coefficients
+
+```{r}
+#| label: lasso-coefs
+
+# Coefficients at lambda.min (minimum CV error)
+lasso_coefs <- coef(fit_lasso, s = "lambda.min")
+cat("LASSO coefficients at lambda.min:\n")
+print(lasso_coefs)
+
+cat("\n\nNon-zero coefficients:", sum(lasso_coefs != 0), "\n")
+```
+
+::: callout-note
+## When to Use LASSO
+
+**Good for:** 
+-   Many potential predictors (p \> 20) 
+-   Weak effects scattered across many variables 
+-   Prediction-focused analyses
+
+**Not ideal for:** 
+-   Small sample sizes (n \< 100) 
+-   Strong prior knowledge of important variables 
+-   Inference/interpretation is primary goal
+:::
+
+------------------------------------------------------------------------
+
+# Part 9: Team Exercise {background-color="#fff9e6"}
+
+## Hands-On Practice (25 minutes)
+
+::: callout-important
+## Your Challenge
+
+Working in teams of 2--3, build and defend your "best" Cox model for PBC survival.
+
+**Requirements:** 
+
+1.    Include **one interaction term** of your choice 
+2.    Include **one non-linear term** (polynomial or spline) 
+3.    Check and address **PH violations** (stratify if needed) 
+4.    Run complete diagnostics (residuals, influential points) 
+5.    Report final model performance (C-index, AIC) 
+6.    Write a 2-3 sentence clinical interpretation
+:::
+
+### Exercise Template
+
+```{r}
+#| label: exercise-template
+#| eval: false
+
+# STEP 1: Choose your interaction
+# Ideas: trt*edema, trt*sex, age*sex, bili*albumin
+my_interaction <- "trt * edema"  # Replace with your choice
+
+# STEP 2: Choose non-linearity approach
+# Ideas: poly(age, 2), pspline(age), poly(bili, 2), log transformations
+my_nonlinear <- "poly(age, 2, raw = TRUE)"  # Replace with your choice
+
+# STEP 3: Fit your model
+my_model <- coxph(
+  Surv(time_years, event) ~ "_____" + "_____" + "_____" + "_____", # Add your terms
+  data = dat_core
+)
+
+# STEP 4: Run diagnostics
+## PH assumption
+ph_check <- cox.zph(my_model)
+print(ph_check)
+ggcoxzph(ph_check)
+
+## Functional form
+ggcoxfunctional(Surv(time_years, event) ~ age + log(bili), data = dat_core)
+
+## Residuals
+ggcoxdiagnostics(my_model, type = "deviance")
+ggcoxdiagnostics(my_model, type = "dfbeta")
+
+# STEP 5: Address violations (if any)
+## If PH violated, try stratification:
+# my_model_v2 <- coxph(
+#   Surv(time_years, event) ~ ... + strata(violating_variable),
+#   data = dat_core
+# )
+
+# STEP 6: Final model summary
+summary(my_model)
+
+# STEP 7: Performance metrics
+cat("C-index:", summary(my_model)$concordance[1], "\n")
+cat("AIC:", AIC(my_model), "\n")
+
+# STEP 8: Tidy results for interpretation
+tidy(my_model, exponentiate = TRUE, conf.int = TRUE) %>%
+  arrange(p.value) %>%
+  kable(digits = 3)
+```
+
+### Deliverable: Complete This Table
+
+| Component                                   | Your Result |
+|---------------------------------------------|-------------|
+| **Interaction term used**                   |             |
+| **Non-linear term used**                    |             |
+| **Significant predictors (p\<0.05)**        |             |
+| **PH violations detected?**                 | Yes / No    |
+| **If yes, how addressed?**                  |             |
+| **Final C-index**                           |             |
+| **AIC**                                     |             |
+| **Clinical interpretation (2-3 sentences)** |             |
+
+### Guiding Questions
+
+::: callout-tip
+## Discussion Points
+
+1.  **Why did you choose this interaction?** (Clinical rationale)
+2.  **Did non-linearity improve fit?** (Compare AIC before/after)
+3.  **Were there influential observations?** (How many? What to do?)
+4.  **How does your model compare to the baseline?** (Better discrimination?)
+5.  **What's ONE clinical recommendation** from your model?
+:::
+
+------------------------------------------------------------------------
+
+# Part 10: Debrief & Synthesis {background-color="#e6ffe6"}
+
+## Team Presentations (10 minutes)
+
+Each team shares (2 min each):
+
+1.  **Model specification**: What you included and why
+2.  **Key finding**: Most important clinical insight
+3.  **Challenges**: What was difficult? How did you resolve it?
+4.  **Model quality**: C-index, any concerns about diagnostics
+
+## Key Takeaways
+
+::: callout-important
+## Core Principles for Cox Modeling
+
+**Model Building** 
+-   Start simple, add complexity only when justified 
+-   Use clinical knowledge to guide variable selection 
+-   Respect the EPV rule (avoid overfitting)
+
+**Diagnostics Are Not Optional** 
+-   Always check PH assumption (stratify if violated) 
+-   Inspect residuals for patterns 
+-   Investigate (but don't blindly remove) influential points
+
+**Interpretation Over Prediction** 
+-   Can you explain your model to a clinician? 
+-   Are interactions clinically sensible? 
+-   Report uncertainty (confidence intervals, not just p-values)
+
+**Model Comparison** 
+-   Use AIC + LRT for nested models 
+-   Prefer parsimony when models are equivalent (ΔAIC \< 2) 
+-   C-index reflects discrimination, not calibration
+:::
+
+## Common Mistakes to Avoid
+
+::: callout-warning
+## Pitfalls
+
+1.  **Ignoring PH violations** → Biased HRs, incorrect inference
+2.  **Too many variables** → Overfitting, unstable estimates
+3.  **Stepwise without validation** → Spurious associations
+4.  **Interpreting main effects when interactions present** → Wrong conclusion
+5.  **Removing "outliers" without justification** → Cherry-picking
+6.  **Forgetting clinical context** → Statistically significant ≠ clinically important
+:::
+
+------------------------------------------------------------------------
+
+# Appendix: Quick Reference {.unnumbered}
+
+## Diagnostic Checklist
+
+::: {.callout-note icon="false"}
+## Pre-Modeling
+
+-   [ ] Explore data (missingness, outliers, distributions)
+-   [ ] Kaplan-Meier curves by key groups
+-   [ ] Choose transformations (e.g., log for skewed variables)
+
+## Model Fitting
+
+-   [ ] Check sample size vs parameters (EPV ≥ 10)
+-   [ ] Fit baseline model (main effects only)
+-   [ ] Add interactions if justified
+-   [ ] Test non-linearity if suspected
+
+## Diagnostics
+
+-   [ ] Test PH assumption (`cox.zph`)
+    -   [ ] Stratify or transform if violated
+-   [ ] Check functional form (martingale residuals)
+-   [ ] Inspect deviance residuals (overall fit)
+-   [ ] Identify influential points (DFBeta)
+
+## Performance & Comparison
+
+-   [ ] Calculate C-index
+-   [ ] Compare models (AIC, LRT)
+-   [ ] Validate if sample size permits (bootstrap, cross-validation)
+
+## Reporting
+
+-   [ ] HR table with 95% CIs and p-values
+-   [ ] Forest plot or adjusted survival curves
+-   [ ] State sample size, events, follow-up time
+-   [ ] Interpret in clinical terms (not just statistics!)
+:::
+
+## Essential R Commands
+
+```{r}
+#| label: command-reference
+#| eval: false
+
+## Model Fitting
+coxph(Surv(time, status) ~ x1 + x2, data = df)
+
+## Interactions
+coxph(Surv(time, status) ~ x1 * x2, data = df)  # x1 + x2 + x1:x2
+
+## Non-linearity
+coxph(Surv(time, status) ~ poly(x, 2, raw=TRUE), data = df)  # Quadratic
+coxph(Surv(time, status) ~ pspline(x, df=4), data = df)      # Spline
+
+## Stratification (for PH violations)
+coxph(Surv(time, status) ~ x1 + strata(x2), data = df)
+
+## Diagnostics
+cox.zph(fit)                                    # PH test
+ggcoxzph(cox.zph(fit))                          # PH plots
+ggcoxfunctional(Surv(time, status) ~ x, data=df) # Linearity check
+ggcoxdiagnostics(fit, type="deviance")          # Deviance residuals
+ggcoxdiagnostics(fit, type="dfbeta")            # Influential points
+
+## Model Comparison
+anova(fit1, fit2)                               # LRT (nested models)
+AIC(fit1, fit2)                                 # AIC (any models)
+
+## Performance
+summary(fit)$concordance                        # C-index
+
+## Visualization
+ggforest(fit, data=df)                          # Forest plot
+ggsurvplot(fit, ...)                            # Survival curves
+ggadjustedcurves(fit, variable="x", data=df)   # Adjusted curves
+```
+
+## Statistical Tests Summary
+
+| Test           | Null Hypothesis                   | Use Case                            | R Function          |
+|-----------------|------------------|---------------------|-----------------|
+| **Wald**       | $\beta_j = 0$                     | Individual coefficient significance | `summary(fit)`      |
+| **Score**      | All $\beta = 0$ (global null)     | Quick omnibus test                  | `summary(fit)`      |
+| **LRT**        | Nested model fits equally well    | Comparing nested models             | `anova(fit1, fit2)` |
+| **Schoenfeld** | PH assumption holds for covariate | Testing proportional hazards        | `cox.zph(fit)`      |
+
+## C-Index Benchmarks
+
+```{r}
+#| label: c-index-table
+#| echo: false
+
+cindex_ref <- data.frame(
+  `C-Index Range` = c("0.50", "0.51–0.60", "0.61–0.70", "0.71–0.80", "0.81–0.90", "0.91–1.00"),
+  `Performance` = c("No discrimination", "Very weak", "Weak", "Acceptable", "Good to Excellent", "Nearly perfect"),
+  `Clinical Context` = c(
+    "Model adds no value",
+    "Minimal clinical utility",
+    "Some prognostic value",
+    "Useful for risk stratification",
+    "Strong clinical tool",
+    "Check for overfitting!"
+  ),
+  check.names = FALSE
+)
+
+kable(cindex_ref, caption = "Concordance Index Interpretation Guide")
+```
+
+## Recommended Readings
+
+::: {.callout-note icon="false" collapse="true"}
+## Essential References
+
+1.  **Therneau, T. M. & Grambsch, P. M.** (2000). *Modeling Survival Data: Extending the Cox Model.* Springer.
+    -   Definitive technical reference
+2.  **Hosmer, D. W., Lemeshow, S., & May, S.** (2008). *Applied Survival Analysis* (2nd ed.). Wiley.
+    -   Accessible applied approach
+3.  **Harrell, F. E.** (2015). *Regression Modeling Strategies* (2nd ed.). Springer.
+    -   Advanced modeling philosophy; excellent on validation
+4.  **Schoenfeld, D.** (1982). Partial residuals for the proportional hazards regression model. *Biometrika*, 69(1), 239--241.
+    -   Original PH diagnostic paper
+5.  **Peduzzi, P., et al.** (1995). Importance of events per independent variable in proportional hazards regression analysis II. Accuracy and precision of regression estimates. *J Clin Epidemiol*, 49(12), 1373--1379.
+    -   EPV rule derivation
+6.  **Grambsch, P. M. & Therneau, T. M.** (1994). Proportional hazards tests and diagnostics based on weighted residuals. *Biometrika*, 81(3), 515--526.
+    -   Extended diagnostics
+7.  **Royston, P. & Altman, D. G.** (2013). External validation of a Cox prognostic model: principles and methods. *BMC Med Res Methodol*, 13(1), 33.
+    -   Validation strategies
+:::
+
+------------------------------------------------------------------------
+
+# Practice Problems {.unnumbered}
+
+Work through these on your own to reinforce concepts.
+
+## Problem 1: Building & Interpreting
+
+Using the `pbc` data:
+
+1.  Fit a Cox model with `age`, `sex`, `log(bili)`, and `albumin`
+2.  Interpret the HR for albumin in clinical terms
+3.  Calculate the HR for someone 10 years older (holding other variables constant)
+4.  Test whether adding `protime` significantly improves the model
+
+::: {.callout-tip collapse="true"}
+## Hints
+
+-   Use `tidy(fit, exponentiate=TRUE, conf.int=TRUE)` for neat output
+-   For age effect: HR for 10 years = $(e^{\beta_{\text{age}}})^{10}$
+-   Compare models with `anova(fit1, fit2)`
+:::
+
+## Problem 2: Interactions
+
+1.  Fit a model with `trt`, `sex`, and their interaction
+2.  Calculate the treatment HR separately for males and females
+3.  Test whether the interaction is significant
+4.  Create adjusted survival curves for males vs females
+
+## Problem 3: Diagnostics
+
+Using your model from Problem 1:
+
+1.  Test the PH assumption for each covariate
+2.  Check for non-linearity in age and bilirubin
+3.  Identify the 5 most influential observations (DFBeta)
+4.  If PH is violated for any variable, fit a stratified model and compare results
+
+## Problem 4: Model Selection
+
+1.  Fit three models with different combinations of predictors
+2.  Compare them using AIC and LRT
+3.  Calculate C-index for each
+4.  Which model would you choose? Justify based on:
+    -   Statistical criteria
+    -   Clinical interpretability
+    -   EPV considerations
+
+::: {.callout-note collapse="true"}
+## Model Ideas
+
+-   **Model A:** Age + sex + bili (simple)
+-   **Model B:** Age + sex + bili + albumin + protime (clinical standard)
+-   **Model C:** Model B + age×sex interaction (complex)
+:::
+
+## Problem 5: Capstone Analysis
+
+**Scenario:** You're consulting on a clinical trial for PBC treatment.
+
+1.  Build a **prognostic model** (ignore treatment) using available baseline variables
+2.  Check all assumptions and diagnostics
+3.  Report C-index and interpret
+4.  Add `trt` to your prognostic model---does treatment improve outcomes after adjusting for prognosis?
+5.  Write a short paragraph (5-7 sentences) explaining your findings to a non-statistician collaborator
+
+------------------------------------------------------------------------
+
+::: callout-important
+## Next Steps
+
+**To deepen your skills:** - Apply these methods to your own data - Try bootstrap validation of your models - Explore competing risks (Fine-Gray models) - Learn time-dependent covariates for PH violations - Study calibration plots (predicted vs observed survival)
+
+**Resources:** - `survival` package vignettes: `vignette(package="survival")` - Harrell's RMS course: https://hbiostat.org/rms/ - DataCamp: "Survival Analysis in R"
+:::
+
+**Thank you! Questions?**
+
+[← Return to Course Materials](https://bsta-150.github.io/course/)
+
+[Link to qmd (quarto markdown)](https://github.com/BSTA-150/chapter4/blob/main/chapter4.qmd)
