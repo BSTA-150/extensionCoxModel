@@ -63,7 +63,7 @@ Key teaching points:
 - Encourage questions during diagnostics section
 -->
 ```
-[Link to qmd (quarto markdown)](https://github.com/BSTA-150/chapter4/blob/main/chapter4.qmd)
+[Link to qmd (quarto markdown)](https://github.com/BSTA-150/extensionCoxModel/blob/main/ExtensionsCoxModel.qmd)
 
 # Learning Objectives {.unnumbered}
 
@@ -1458,4 +1458,4 @@ Using your model from Problem 1:
 
 [← Return to Course Materials](https://bsta-150.github.io/course/)
 
-[Link to qmd (quarto markdown)](https://github.com/BSTA-150/chapter4/blob/main/chapter4.qmd)
+[Link to qmd (quarto markdown)](https://github.com/BSTA-150/extensionCoxModel/blob/main/ExtensionsCoxModel.qmd)
